@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LumiNudge - 시선 추적 프로토타입</title>
+<style>
+    :root {
+        --bg: #0f1115;
+        --panel: #1a1d24;
+        --border: #2a2e37;
+        --text: #e8e9ec;
+        --muted: #9aa0ab;
+        --accent: #5b8def;
+        --danger: #ff5c5c;
+        --warn: #ffb84d;
+        --ok: #4caf7d;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 24px 16px 60px;
+    }
+    h1 {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 4px;
+    }
+    p.subtitle {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0 0 20px;
+    }
+    .layout {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+        justify-content: center;
+        width: 100%;
+        max-width: 980px;
+    }
+    .video-wrap {
+        position: relative;
+        width: 640px;
+        max-width: 100%;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        background: #000;
+    }
+    #webcam {
+        display: none;
+    }
+    #output_canvas {
+        width: 100%;
+        height: auto;
+        display: block;
+        transform: scaleX(-1); /* 거울 모드 */
+    }
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px;
+        width: 280px;
+        max-width: 100%;
+        height: fit-content;
+    }
+    .panel h2 {
+        font-size: 14px;
+        margin: 0 0 14px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .metric-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 14px;
+    }
+    .metric-row:last-child { border-bottom: none; }
+    .metric-label { color: var(--muted); }
+    .metric-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    button#calib_btn {
+        width: 100%;
+        margin-top: 16px;
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: none;
+        background: var(--accent);
+        color: white;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.15s;
+    }
+    button#calib_btn:hover { opacity: 0.9; }
+    button#calib_btn:disabled {
+        background: #33394a;
+        cursor: not-allowed;
+    }
+
+    .highlight {
+        margin-top: 16px;
+        padding: 12px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        text-align: center;
+        background: #22252d;
+        border: 1px solid var(--border);
+    }
+    .status-normal { color: var(--ok); border-color: var(--ok); }
+    .status-warn   { color: var(--warn); border-color: var(--warn); }
+    .status-danger { color: var(--danger); border-color: var(--danger); }
+</style>
+</head>
+<body>
+
+<h1>LumiNudge 시선 추적 프로토타입</h1>
+<p class="subtitle">웹캠 권한을 허용한 뒤 캘리브레이션 버튼을 눌러주세요.</p>
+
+<div class="layout">
+    <div class="video-wrap">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas" width="640" height="480"></canvas>
+    </div>
+
+    <div class="panel">
+        <h2>성능</h2>
+        <div class="metric-row"><span class="metric-label">FPS</span><span class="metric-value" id="fps_val">-</span></div>
+        <div class="metric-row"><span class="metric-label">지연시간 (ms)</span><span class="metric-value" id="latency_val">-</span></div>
+
+        <h2 style="margin-top:20px;">신호</h2>
+        <div class="metric-row"><span class="metric-label">BR (깜빡임)</span><span class="metric-value" id="br_val">-</span></div>
+        <div class="metric-row"><span class="metric-label">GV (시선 분산)</span><span class="metric-value" id="gv_val">-</span></div>
+        <div class="metric-row"><span class="metric-label">FD (고정, s)</span><span class="metric-value" id="fd_val">-</span></div>
+        <div class="metric-row"><span class="metric-label">CLS 점수</span><span class="metric-value" id="cls_val">-</span></div>
+
+        <button id="calib_btn">캘리브레이션 시작 (10초)</button>
+        <div class="highlight status-normal" id="nudge_status">캘리브레이션을 먼저 진행하세요</div>
+    </div>
+</div>
+
+<!-- MediaPipe 라이브러리 (반드시 아래 스크립트가 먼저 로드되어야 함) -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+<script>
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+
+    const fpsVal = document.getElementById('fps_val');
+    const latencyVal = document.getElementById('latency_val');
+    const brVal = document.getElementById('br_val');
+    const gvVal = document.getElementById('gv_val');
+    const fdVal = document.getElementById('fd_val');
+    const clsVal = document.getElementById('cls_val');
+    const nudgeStatus = document.getElementById('nudge_status');
+    const calibBtn = document.getElementById('calib_btn');
+
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+
+    // 캘리브레이션 상태
+    let isCalibrating = false;
+    let isCalibrated = false;
+    let calibStartTime = 0;
+    let calibEarBuffer = [];
+    let calibIrisRatioBuffer = []; // 이름 변경: 절대좌표 -> 비율
+    let calibBlinkCount = 0;
+
+    // ----------------------------------------------------
+    // 유틸리티 (거리, EAR, 홍채 비율)
+    // ----------------------------------------------------
+    function getDistance(p1, p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+    }
+
+    function calculateEAR(landmarks, eyeIndices) {
+        const p1 = landmarks[eyeIndices[0]], p2 = landmarks[eyeIndices[1]], p3 = landmarks[eyeIndices[2]];
+        const p4 = landmarks[eyeIndices[3]], p5 = landmarks[eyeIndices[4]], p6 = landmarks[eyeIndices[5]];
+        return (getDistance(p2, p6) + getDistance(p3, p5)) / (2.0 * getDistance(p1, p4));
+    }
+
+    // 홍채가 눈 안쪽 코너 대비 눈 너비 중 어디에 있는지 비율(0~1)로 계산
+    // 절대좌표가 아니라 상대 위치라 머리가 좌우로 움직여도 덜 흔들림
+    function getIrisRatio(landmarks, irisIdx, innerIdx, outerIdx) {
+        const iris = landmarks[irisIdx];
+        const inner = landmarks[innerIdx];
+        const outer = landmarks[outerIdx];
+        const eyeWidth = getDistance(inner, outer);
+        if (eyeWidth < 1e-6) return 0.5; // 눈 너비 0에 가까우면 안전값 반환
+        const distFromInner = getDistance(iris, inner);
+        return distFromInner / eyeWidth;
+    }
+
+    // ----------------------------------------------------
+    // 신호 프로세서 (GV, BR, FD, CLS, Nudge 산출)
+    // ----------------------------------------------------
+    class SignalProcessor {
+        constructor(windowSizeMs = 10000) {
+            this.windowSizeMs = windowSizeMs;
+            this.dataBuffer = [];
+            this.blinkTimestamps = [];
+            this.isBlinking = false;
+
+            this.lastIrisRatio = null;
+            this.lastFrameTime = null;
+            this.currentFD = 0;
+
+            this.EAR_THRESHOLD = 0.22;
+            this.baselineGV = 0;
+            this.baselineBR = 0;
+
+            // --- Nudge throttling 상태 ---
+            this.NUDGE_COOLDOWN_MS = 5 * 60 * 1000; // 5분
+            this.lastNudgeTime = null;
+        }
+
+        update(ear, irisRatio, now) {
+            // 1. 버퍼 업데이트
+            this.dataBuffer.push({ irisRatio, timestamp: now });
+            this.dataBuffer = this.dataBuffer.filter(d => now - d.timestamp <= this.windowSizeMs);
+
+            // 2. 깜빡임 (BR) 감지
+            if (ear < this.EAR_THRESHOLD && !this.isBlinking) {
+                this.isBlinking = true;
+            } else if (ear >= this.EAR_THRESHOLD && this.isBlinking) {
+                this.isBlinking = false;
+                this.blinkTimestamps.push(now);
+                if (isCalibrating) calibBlinkCount++;
+            }
+            this.blinkTimestamps = this.blinkTimestamps.filter(t => now - t <= this.windowSizeMs);
+
+            // 3. 고정 지속시간 (FD) 감지
+            // 비율 기준이라 허용 오차(tolerance)도 비율 스케일로 재조정
+            const FD_TOLERANCE = 0.01; // 눈 너비의 1%
+            if (this.lastIrisRatio !== null && this.lastFrameTime !== null) {
+                if (Math.abs(irisRatio - this.lastIrisRatio) < FD_TOLERANCE) {
+                    this.currentFD += (now - this.lastFrameTime);
+                } else {
+                    this.currentFD = 0;
+                }
+            }
+            this.lastIrisRatio = irisRatio;
+            this.lastFrameTime = now;
+        }
+
+        // CLS 기준 intensity 판정 + throttling 적용
+        evaluateNudge(cls, now) {
+            let intensity = "none";
+            if (cls >= 0.7) intensity = "strong";
+            else if (cls >= 0.5) intensity = "soft";
+
+            let triggered = false;
+            const onCooldown = this.lastNudgeTime !== null &&
+                (now - this.lastNudgeTime) < this.NUDGE_COOLDOWN_MS;
+
+            if (intensity !== "none" && !onCooldown) {
+                triggered = true;
+                this.lastNudgeTime = now;
+            }
+
+            return {
+                intensity,
+                triggered,
+                onCooldown,
+                cooldownRemainingMs: onCooldown ? this.NUDGE_COOLDOWN_MS - (now - this.lastNudgeTime) : 0
+            };
+        }
+
+        getMetrics(now) {
+            const br = this.blinkTimestamps.length;
+            let gv = 0;
+
+            if (this.dataBuffer.length > 0) {
+                const n = this.dataBuffer.length;
+                const meanRatio = this.dataBuffer.reduce((sum, d) => sum + d.irisRatio, 0) / n;
+                gv = this.dataBuffer.reduce((sum, d) => sum + Math.pow(d.irisRatio - meanRatio, 2), 0) / n;
+            }
+
+            let cls = 0;
+            if (isCalibrated) {
+                let gv_ratio = Math.max(0, Math.min(1, gv / this.baselineGV));
+                let gv_norm = Math.pow(1 - gv_ratio, 2);
+
+                let safeBaselineBR = Math.max(this.baselineBR, 1);
+                let br_ratio = br / safeBaselineBR;
+                let br_norm = br_ratio >= 0.5 ? 0 : (1 - (br_ratio / 0.5));
+
+                let fd_norm = Math.max(0, Math.min(1, this.currentFD / 5000));
+
+                cls = (0.5 * gv_norm) + (0.3 * fd_norm) + (0.2 * br_norm);
+            }
+
+            const nudge = this.evaluateNudge(cls, now);
+
+            return {
+                br, gv, fd: this.currentFD / 1000, cls,
+                intensity: nudge.intensity,
+                triggered: nudge.triggered,
+                onCooldown: nudge.onCooldown,
+                cooldownRemainingMs: nudge.cooldownRemainingMs
+            };
+        }
+    }
+
+    const processor = new SignalProcessor(10000);
+
+    // ----------------------------------------------------
+    // Nudge 이벤트 발화 (Dev/AI-2 연동 지점 — 백엔드 연동)
+    // ----------------------------------------------------
+    const ATTENTION_API_URL = "http://localhost:8000/attention/cls";
+
+    async function emitNudgeEvent(payload) {
+        console.log("[nudge_event]", payload);
+        window.dispatchEvent(new CustomEvent("luminudge:nudge", { detail: payload }));
+
+        try {
+            const res = await fetch(ATTENTION_API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) {
+                console.error("[nudge_event] 서버 응답 오류:", res.status);
+                return;
+            }
+            const data = await res.json();
+            console.log("[nudge_event] 서버 응답:", data);
+        } catch (err) {
+            console.error("[nudge_event] 전송 실패:", err);
+        }
+    }
+
+    // ----------------------------------------------------
+    // 이벤트
+    // ----------------------------------------------------
+    calibBtn.addEventListener('click', () => {
+        isCalibrating = true;
+        isCalibrated = false;
+        calibStartTime = performance.now();
+        calibEarBuffer = [];
+        calibIrisRatioBuffer = [];
+        calibBlinkCount = 0;
+        calibBtn.disabled = true;
+        clsVal.innerText = "측정 중...";
+        nudgeStatus.innerText = "-";
+    });
+
+    // ----------------------------------------------------
+    // 메인 렌더링 및 추론 루프
+    // ----------------------------------------------------
+    function onResults(results) {
+        const now = performance.now();
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        if (results.poseLandmarks) {
+            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#00FF00', lineWidth: 4});
+        }
+
+        if (results.faceLandmarks) {
+            const landmarks = results.faceLandmarks;
+            drawConnectors(canvasCtx, landmarks, FACEMESH_RIGHT_IRIS, {color: '#FFFF30', lineWidth: 2});
+            drawConnectors(canvasCtx, landmarks, FACEMESH_LEFT_IRIS, {color: '#FFFF30', lineWidth: 2});
+
+            const avgEAR = (calculateEAR(landmarks, [33, 160, 158, 133, 153, 144]) + calculateEAR(landmarks, [362, 385, 387, 263, 373, 380])) / 2;
+
+            // --- 홍채 비율: 양쪽 눈 평균 ---
+            const rightRatio = getIrisRatio(landmarks, 468, 133, 33);
+            const leftRatio = getIrisRatio(landmarks, 473, 362, 263);
+            const avgIrisRatio = (rightRatio + leftRatio) / 2;
+
+            // --- 캘리브레이션 처리 ---
+            if (isCalibrating) {
+                const elapsed = now - calibStartTime;
+                calibEarBuffer.push(avgEAR);
+                calibIrisRatioBuffer.push(avgIrisRatio);
+                calibBtn.innerText = `측정 중... ${Math.ceil(10 - elapsed/1000)}초`;
+
+                if (elapsed >= 10000) {
+                    isCalibrating = false;
+                    isCalibrated = true;
+                    calibBtn.innerText = "캘리브레이션 재시도";
+                    calibBtn.disabled = false;
+
+                    processor.EAR_THRESHOLD = (calibEarBuffer.reduce((a, b) => a + b, 0) / calibEarBuffer.length) * 0.75;
+                    const meanRatio = calibIrisRatioBuffer.reduce((a, b) => a + b, 0) / calibIrisRatioBuffer.length;
+                    processor.baselineGV = calibIrisRatioBuffer.reduce((sum, r) => sum + Math.pow(r - meanRatio, 2), 0) / calibIrisRatioBuffer.length;
+                    processor.baselineBR = calibBlinkCount;
+                }
+            }
+
+            // --- 신호 업데이트 및 UI 렌더링 ---
+            processor.update(avgEAR, avgIrisRatio, now);
+            const metrics = processor.getMetrics(now);
+
+            brVal.innerText = metrics.br;
+            gvVal.innerText = metrics.gv.toFixed(5);
+            fdVal.innerText = metrics.fd.toFixed(1);
+
+            if (isCalibrated) {
+                clsVal.innerText = metrics.cls.toFixed(3);
+
+                if (metrics.intensity === "strong") {
+                    nudgeStatus.innerText = metrics.onCooldown
+                        ? `🚨 강한 상태 (쿨다운 ${Math.ceil(metrics.cooldownRemainingMs/1000)}s)`
+                        : "🚨 강한 개입 (일시정지+미션)";
+                    nudgeStatus.className = "highlight status-danger";
+                } else if (metrics.intensity === "soft") {
+                    nudgeStatus.innerText = metrics.onCooldown
+                        ? `⚠️ 약한 상태 (쿨다운 ${Math.ceil(metrics.cooldownRemainingMs/1000)}s)`
+                        : "⚠️ 약한 개입 (루미 등장)";
+                    nudgeStatus.className = "highlight status-warn";
+                } else {
+                    nudgeStatus.innerText = "✅ 정상 시청 (개입 없음)";
+                    nudgeStatus.className = "highlight status-normal";
+                }
+
+                if (metrics.triggered) {
+                    emitNudgeEvent({
+                        cls_score: metrics.cls,
+                        intensity: metrics.intensity,
+                        gv: metrics.gv,
+                        fd: metrics.fd,
+                        br: metrics.br,
+                        timestamp: now
+                    });
+                }
+            }
+        }
+        canvasCtx.restore();
+    }
+
+    const holistic = new Holistic({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`});
+    holistic.setOptions({ modelComplexity: 0, smoothLandmarks: true, refineFaceLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    holistic.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            const startTime = performance.now();
+            await holistic.send({image: videoElement});
+            const endTime = performance.now();
+            latencyVal.innerText = Math.round(endTime - startTime);
+            frameCount++;
+            if (endTime - lastFpsTime >= 1000) {
+                fpsVal.innerText = frameCount;
+                frameCount = 0;
+                lastFpsTime = endTime;
+            }
+        },
+        width: 640, height: 480
+    });
+    camera.start();
+</script>
+</body>
+</html>
