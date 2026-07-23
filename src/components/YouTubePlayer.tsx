@@ -16,7 +16,7 @@ declare global {
         }
       ) => YTPlayer;
     };
-    onYouTubeIframeAPIReady: () => void;
+    onYouTubeIframeAPIReady?: () => void;
   }
 }
 
@@ -27,16 +27,39 @@ interface YTPlayer {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
 }
 
+// YouTube IFrame API 스크립트는 페이지에 한 번만 로드되어야 하고,
+// window.onYouTubeIframeAPIReady는 전역 콜백 1개뿐이라 여러 플레이어가
+// 각자 덮어쓰면 마지막 컴포넌트만 초기화된다. 로더를 모듈 스코프에서
+// 한 번만 만들고, 모든 플레이어가 같은 Promise를 기다리게 해서 해결한다.
+let youtubeApiPromise: Promise<void> | null = null;
+
+function loadYouTubeIframeAPI(): Promise<void> {
+  if (youtubeApiPromise) return youtubeApiPromise;
+
+  youtubeApiPromise = new Promise((resolve) => {
+    if (window.YT?.Player) {
+      resolve();
+      return;
+    }
+    window.onYouTubeIframeAPIReady = () => resolve();
+
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.body.appendChild(tag);
+  });
+
+  return youtubeApiPromise;
+}
+
 export default function YouTubePlayer({ videoId }: { videoId: string }) {
   const playerRef = useRef<YTPlayer | null>(null);
   const elementId = `yt-player-${videoId}`;
 
   useEffect(() => {
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    document.body.appendChild(tag);
+    let cancelled = false;
 
-    window.onYouTubeIframeAPIReady = () => {
+    loadYouTubeIframeAPI().then(() => {
+      if (cancelled) return;
       playerRef.current = new window.YT.Player(elementId, {
         videoId,
         events: {
@@ -44,6 +67,10 @@ export default function YouTubePlayer({ videoId }: { videoId: string }) {
           onStateChange: (e) => console.log('state', videoId, e.data),
         },
       });
+    });
+
+    return () => {
+      cancelled = true;
     };
   }, [videoId, elementId]);
 
